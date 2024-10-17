@@ -8,6 +8,9 @@ import (
 	hcl "github.com/joselitofilho/hcl-parser-go/pkg/parser/hcl"
 )
 
+type CloudName string
+type LocalCloudVarName string
+
 type Resource struct {
 	CPU  int
 	MEM  int
@@ -25,37 +28,11 @@ func main() {
 		return
 	}
 
-	// Local variables - use to parse clouds
-	clouds := map[string]*Resource{
-		"DEFAULT": &Resource{},
-	}
-	for _, variable := range config.Locals {
-		fmt.Println("Var: ", variable)
-		for key := range variable.Attributes {
-			if strings.Contains(key, "project_name") {
-				clouds[key] = &Resource{}
-			}
-		}
-	}
-	local_var_to_cloud_map := map[string]string{}
-	for _, variable := range config.Locals {
-		for key, val := range variable.Attributes {
-			if !strings.Contains(key, "clouds_yaml") {
-				continue
-			}
-			if clouds_yaml_contents, ok := val.(string); !ok {
-				continue
-			} else {
-				for cloud_name := range clouds {
-					if strings.Contains(clouds_yaml_contents, cloud_name) {
-						local_var_to_cloud_map[key] = cloud_name
-					}
-				}
-			}
-		}
-	}
+	clouds := parseClouds(config)
+	local_var_to_cloud_map := parseLocalVarToClouds(config, &clouds)
 
-	fmt.Println(clouds, local_var_to_cloud_map)
+	fmt.Println("All detected clouds: ", clouds)
+	fmt.Println("All dtected local var mapping to clouds: ", local_var_to_cloud_map)
 
 	// Print resources
 	fmt.Println("Resources:")
@@ -68,7 +45,7 @@ func main() {
 			fmt.Println("Application constraint not defined.")
 		} else {
 			constraint_str := app_constraints.(string)
-			resrc := parse_constraints(constraint_str)
+			resrc := parseConstraints(constraint_str)
 			clouds["DEFAULT"].CPU += resrc.CPU
 			clouds["DEFAULT"].MEM += resrc.MEM
 			clouds["DEFAULT"].DISK += resrc.DISK
@@ -82,7 +59,7 @@ func main() {
 				fmt.Println("Invalid config map type.")
 				continue
 			} else {
-
+				config_map
 			}
 		}
 	}
@@ -96,7 +73,70 @@ func main() {
 	}
 }
 
-func parse_constraints(constraint_str string) Resource {
+func parseClouds(config *hcl.Config) map[CloudName]*Resource {
+	clouds := map[CloudName]*Resource{
+		"DEFAULT": &Resource{},
+	}
+	for _, variable := range config.Locals {
+		for key := range variable.Attributes {
+			if strings.Contains(key, "project_name") {
+				clouds[CloudName(key)] = &Resource{}
+			}
+		}
+	}
+	return clouds
+}
+
+func parseLocalVarToClouds(config *hcl.Config, clouds *map[CloudName]*Resource) map[LocalCloudVarName]CloudName {
+	local_var_to_cloud_map := map[LocalCloudVarName]CloudName{}
+	for _, variable := range config.Locals {
+		for key, val := range variable.Attributes {
+			if !strings.Contains(key, "clouds_yaml") {
+				continue
+			}
+			clouds_yaml_contents := val.(string)
+			for cloud_name := range *clouds {
+				if strings.Contains(clouds_yaml_contents, string(cloud_name)) {
+					local_var_to_cloud_map[LocalCloudVarName(key)] = CloudName(cloud_name)
+				}
+			}
+		}
+	}
+	return local_var_to_cloud_map
+}
+
+// Return resource for charm deployment and VM deployment
+func parseRunner(resource *hcl.Resource, varNameToCloudName *map[LocalCloudVarName]CloudName) (CloudName, Resource, CloudName, Resource) {
+	if resource.Type != "juju_application" {
+		return "", Resource{}, "", Resource{}
+	}
+	if strings.Contains(resource.Name, "image-builder") {
+		return "", Resource{}, "", Resource{}
+	}
+	if !strings.Contains(resource.Name, "github-runner") {
+		fmt.Println("Invalid resource name detected, assuming runner.")
+	}
+	constraints := resource.Attributes["constraints"].(string)
+	deploy_resource := parseConstraints(constraints)
+	config := resource.Attributes["config"].(map[string]string)
+	if _, ok := config["openstack-clouds-yaml"]; !ok {
+		fmt.Println("Runner application openstack-clouds-yaml not defined.")
+		return "", Resource{}, "", Resource{}
+	}
+	clouds_yaml_var := config["openstack-clouds-yaml"]
+	cloud_name := (*varNameToCloudName)[LocalCloudVarName(clouds_yaml_var)]
+	return CloudName("DEFAULT"), deploy_resource, cloud_name, Resource{}
+}
+
+// Return resource for charm deployment and VM deployment
+func parseImageBuilder(resource *hcl.Resource) (CloudName, Resource, CloudName, Resource) {
+	if resource.Type != "juju_application" {
+		return "", Resource{}, "", Resource{}
+	}
+	return "", Resource{}, "", Resource{}
+}
+
+func parseConstraints(constraint_str string) Resource {
 	resource := Resource{}
 	constraints := strings.Split(constraint_str, " ")
 	for _, constraint := range constraints {
