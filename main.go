@@ -156,6 +156,14 @@ func parseRunner(resource *hcl.Resource, varNameToCloudName *map[LocalCloudVarNa
 	clouds_yaml_var := strings.ReplaceAll(config["openstack-clouds-yaml"].(string), "local.", "")
 	cloud_name := (*varNameToCloudName)[LocalCloudVarName(clouds_yaml_var)]
 	vmResource := parseFlavor(config["openstack-flavor"].(string))
+	numVms, err := strconv.Atoi(config["virtual-machines"].(string))
+	if err != nil {
+		numVms = 0
+		fmt.Println("Invalid virtual-machines config detected")
+	}
+	vmResource.CPU *= numVms
+	vmResource.MEM *= numVms
+	vmResource.DISK *= numVms
 	return CloudName("DEFAULT"), deploy_resource, cloud_name, vmResource
 }
 
