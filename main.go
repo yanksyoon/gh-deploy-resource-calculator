@@ -139,7 +139,7 @@ func parseRunner(resource *hcl.Resource, varNameToCloudName *map[LocalCloudVarNa
 	if resource.Type != "juju_application" {
 		return "", Resource{}, "", Resource{}
 	}
-	if strings.Contains(resource.Name, "image-builder") {
+	if strings.Contains(resource.Name, "image") {
 		return "", Resource{}, "", Resource{}
 	}
 	if !strings.Contains(resource.Name, "github-runner") {
@@ -155,6 +155,9 @@ func parseRunner(resource *hcl.Resource, varNameToCloudName *map[LocalCloudVarNa
 	}
 	clouds_yaml_var := strings.ReplaceAll(config["openstack-clouds-yaml"].(string), "local.", "")
 	cloud_name := (*varNameToCloudName)[LocalCloudVarName(clouds_yaml_var)]
+	if cloud_name == "" {
+		fmt.Println("No cloud name detected for resource name: ", resource.Name)
+	}
 	vmResource := parseFlavor(config["openstack-flavor"].(string))
 	numVms, err := strconv.Atoi(config["virtual-machines"].(string))
 	if err != nil {
@@ -172,9 +175,10 @@ func parseImageBuilder(resource *hcl.Resource, varNameToCloudName *map[LocalClou
 	if resource.Type != "juju_application" {
 		return "", Resource{}, "", Resource{}
 	}
-	if !strings.Contains(resource.Name, "image-builder") {
+	if !strings.Contains(resource.Name, "image") {
 		return "", Resource{}, "", Resource{}
 	}
+	fmt.Println("PARSING IMAGE BUILDER")
 	constraints := resource.Attributes["constraints"].(string)
 	deploy_resource := parseConstraints(constraints)
 	config := resource.Attributes["config"].(map[string]any)
