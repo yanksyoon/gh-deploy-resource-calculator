@@ -9,18 +9,42 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-type CloudName string
-type LocalCloudVarName string
-
 type Resource struct {
-	CPU  int
-	MEM  int
+	// CPU in cores
+	CPU int
+	// MEM in M
+	MEM int
+	// DISK in M
 	DISK int
 }
 
+const JujuApplicationResourceType string = "juju_application"
+const GitHubRunnerCharmName string = "github-runner"
+const ImageBuilderCharmName string = "github-runner-image-builder"
+const UndefinedModelName string = "UNDEFINED"
+
+var DefaultGitHubRunnerResource Resource = Resource{
+	CPU:  2,
+	MEM:  8192,
+	DISK: 29000,
+}
+
+var DefaultImageBuilderResource Resource = Resource{
+	CPU:  2,
+	MEM:  16384,
+	DISK: 51200,
+}
+var DefaultImageBuilderFlavor Resource = Resource{
+	CPU:  2,
+	MEM:  16384,
+	DISK: 20480,
+}
+
+const DefaultNumVirtualMachines int = 1
+
 func main() {
-	directories := []string{}
 	files := []string{"main.tf"}
+	directories := []string{}
 
 	// Parse Terraform configurations
 	config, err := hcl.Parse(directories, files)
@@ -29,245 +53,255 @@ func main() {
 		return
 	}
 
-	cloudToResource := parseClouds(config)
-	local_var_to_cloud_map := parseLocalVarToClouds(config, &cloudToResource)
+	localsMap := map[string]string{}
+	for _, local := range config.Locals {
+		for key, val := range local.Attributes {
+			localsMap[key] = val.(string)
+		}
+	}
 
-	// Print resources
+	cloudToResourceMap := map[string]*Resource{
+		UndefinedModelName: {},
+	}
+
 	for _, resource := range config.Resources {
-		if resource.Type != "juju_application" {
-			fmt.Println("Skipping resource type: ", resource.Type, resource.Name)
+		if resource.Type != JujuApplicationResourceType {
 			continue
 		}
-		if strings.Contains(resource.Name, "image-builder") {
-			deploy_cloud, deploy_resource, vm_cloud, vm_resource := parseImageBuilder(resource, &local_var_to_cloud_map)
-			fmt.Println(deploy_cloud, deploy_resource, vm_cloud, vm_resource)
-			addResourceToClouds(&cloudToResource, deploy_cloud, &deploy_resource)
-			addResourceToClouds(&cloudToResource, vm_cloud, &vm_resource)
-		} else if strings.Contains(resource.Name, "github-runner") || strings.Contains(resource.Name, "runner") {
-			deploy_cloud, deploy_resource, vm_cloud, vm_resource := parseRunner(resource, &local_var_to_cloud_map)
-			fmt.Println(deploy_cloud, deploy_resource, vm_cloud, vm_resource)
-			addResourceToClouds(&cloudToResource, deploy_cloud, &deploy_resource)
-			addResourceToClouds(&cloudToResource, vm_cloud, &vm_resource)
+		charmAttributes := resource.Attributes["charm"].(map[string]any)
+		charm := charmAttributes["name"].(string)
+		charm = replaceLocalVar(&localsMap, charm)
+		if charm == GitHubRunnerCharmName {
+			parseGitHubRunnerCharm(resource, &localsMap, &cloudToResourceMap)
+		} else if charm == ImageBuilderCharmName {
+			parseImageBuilderCharm(resource, &localsMap, &cloudToResourceMap)
 		} else {
-			fmt.Println("Unable to detect resource type from resource name, ", resource.Name)
+			fmt.Println("[WARNING] Skipping charm type: ", charm)
 		}
 	}
 
-	for cloud_name, resource := range cloudToResource {
-		fmt.Println("Cloud: ", cloud_name)
-		fmt.Println("CPU: ", resource.CPU)
-		fmt.Println("RAM: ", resource.MEM)
-		fmt.Println("DISK: ", resource.DISK)
-		fmt.Println()
+	for cloudName, resource := range cloudToResourceMap {
+		fmt.Printf("%s: cpu: %d mem: %dM, disk: %dM\n", cloudName, resource.CPU, resource.MEM, resource.DISK)
 	}
 }
 
-func parseClouds(config *hcl.Config) map[CloudName]*Resource {
-	clouds := map[CloudName]*Resource{
-		"DEFAULT": {},
+func replaceLocalVar(localsMap *map[string]string, varOrValue string) string {
+	if strings.Contains(varOrValue, "local") {
+		varOrValue = strings.ReplaceAll(varOrValue, "local.", "")
+	} else {
+		return varOrValue
 	}
-	for _, variable := range config.Locals {
-		for key, val := range variable.Attributes {
-			if strings.Contains(key, "user_name") {
-				clouds[CloudName(val.(string))] = &Resource{}
-			}
+	if localVar, ok := (*localsMap)[varOrValue]; ok {
+		return localVar
+	}
+	fmt.Println("[WARNING] Local variable not fouund: ", varOrValue)
+	return varOrValue
+}
+
+func parseGitHubRunnerCharm(resource *hcl.Resource, localsMap *map[string]string, cloudResourceMap *map[string]*Resource) {
+	// Manager model deployment resource calculation
+	var localModelResource *Resource
+	if constraint, ok := resource.Attributes["constraints"].(string); ok {
+		constraint = replaceLocalVar(localsMap, constraint)
+		resource := parseConstraints(constraint)
+		localModelResource = &resource
+	} else {
+		fmt.Printf("[WARNING] Constraint for GitHub runner %s not defined.\n", resource.Name)
+		localModelResource = &Resource{
+			CPU:  DefaultGitHubRunnerResource.CPU,
+			MEM:  DefaultGitHubRunnerResource.MEM,
+			DISK: DefaultGitHubRunnerResource.DISK,
 		}
 	}
-	return clouds
+	if modelName, ok := resource.Attributes["model"].(string); ok {
+		modelName = replaceLocalVar(localsMap, modelName)
+		if resource, ok := (*cloudResourceMap)[modelName]; ok {
+			resource.CPU += localModelResource.CPU
+			resource.MEM += localModelResource.MEM
+			resource.DISK += localModelResource.DISK
+		} else {
+			(*cloudResourceMap)[modelName] = localModelResource
+		}
+	} else {
+		fmt.Printf("[WARNING] Default model name for GitHub runner %s not defined.\n", resource.Name)
+		(*cloudResourceMap)[UndefinedModelName].CPU += localModelResource.CPU
+		(*cloudResourceMap)[UndefinedModelName].MEM += localModelResource.MEM
+		(*cloudResourceMap)[UndefinedModelName].DISK += localModelResource.DISK
+	}
+
+	// VM model deployment resource calculation
+	configs := resource.Attributes["config"].(map[string]any)
+	cloudsYaml := configs["openstack-clouds-yaml"].(string)
+	cloudsYaml = replaceLocalVar(localsMap, cloudsYaml)
+	cloudName := parseOpenStackCloudsYaml(cloudsYaml)
+	flavor := configs["openstack-flavor"].(string)
+	flavor = replaceLocalVar(localsMap, flavor)
+	cloudResource := parseOpenStackFlavor(flavor)
+	if resource, ok := (*cloudResourceMap)[cloudName]; ok {
+		resource.CPU += cloudResource.CPU
+		resource.MEM += cloudResource.MEM
+		resource.DISK += cloudResource.DISK
+	} else {
+		(*cloudResourceMap)[cloudName] = &cloudResource
+	}
 }
 
-func parseLocalVarToClouds(config *hcl.Config, clouds *map[CloudName]*Resource) map[LocalCloudVarName]CloudName {
-	local_var_to_cloud_map := map[LocalCloudVarName]CloudName{}
-	localUserNameVarToCloudNameMap := getLocalUserNameVarToCloudNameMap(config, clouds)
-	for _, variable := range config.Locals {
-		for localVarName, localVarValue := range variable.Attributes {
-			if !strings.Contains(localVarName, "clouds_yaml") && !strings.Contains(localVarName, "user_name") {
-				continue
-			}
-			if strings.Contains(localVarName, "clouds_yaml") {
-				clouds_yaml_contents := localVarValue.(string)
-				username := getCloudsYamlUsername(clouds_yaml_contents)
-				if cloudname, ok := localUserNameVarToCloudNameMap[username]; ok {
-					local_var_to_cloud_map[LocalCloudVarName(localVarName)] = cloudname
-				} else {
-					local_var_to_cloud_map[LocalCloudVarName(localVarName)] = CloudName(username)
-				}
-			}
+func parseImageBuilderCharm(resource *hcl.Resource, localsMap *map[string]string, cloudResourceMap *map[string]*Resource) {
+	var localModelResource *Resource
+	if constraint, ok := resource.Attributes["constraints"].(string); ok {
+		constraint = replaceLocalVar(localsMap, constraint)
+		resource := parseConstraints(constraint)
+		localModelResource = &resource
+	} else {
+		fmt.Printf("[WARNING] Constraint for Image builder %s not defined.\n", resource.Name)
+		localModelResource = &Resource{
+			CPU:  DefaultImageBuilderResource.CPU,
+			MEM:  DefaultImageBuilderResource.MEM,
+			DISK: DefaultImageBuilderResource.DISK,
 		}
 	}
-	for usernameVarName, cloudname := range localUserNameVarToCloudNameMap {
-		local_var_to_cloud_map[LocalCloudVarName(usernameVarName)] = cloudname
+	if modelName, ok := resource.Attributes["model"].(string); ok {
+		modelName = replaceLocalVar(localsMap, modelName)
+		if resource, ok := (*cloudResourceMap)[modelName]; ok {
+			resource.CPU += localModelResource.CPU
+			resource.MEM += localModelResource.MEM
+			resource.DISK += localModelResource.DISK
+		} else {
+			(*cloudResourceMap)[modelName] = localModelResource
+		}
+	} else {
+		fmt.Printf("[WARNING] Default model name for Image builder %s not defined.\n", resource.Name)
+		(*cloudResourceMap)[UndefinedModelName].CPU += localModelResource.CPU
+		(*cloudResourceMap)[UndefinedModelName].MEM += localModelResource.MEM
+		(*cloudResourceMap)[UndefinedModelName].DISK += localModelResource.DISK
 	}
-	return local_var_to_cloud_map
+
+	configs := resource.Attributes["config"].(map[string]any)
+	modelName, ok := configs["openstack-user-name"]
+	if !ok {
+		fmt.Printf("[WARNING] openstack-user-name not defined for Image builder %s, likely using local builder.\n", resource.Name)
+		return
+	}
+	modelNameVal := modelName.(string)
+	modelNameVal = replaceLocalVar(localsMap, modelNameVal)
+	flavorStr, ok := configs["experimental-external-build-flavor"]
+	var flavorResource *Resource
+	if !ok {
+		fmt.Printf("[Warning] Image builder flavor not defined for %s, using default.\n", resource.Name)
+		flavorResource = &Resource{
+			CPU:  DefaultImageBuilderFlavor.CPU,
+			MEM:  DefaultImageBuilderFlavor.MEM,
+			DISK: DefaultImageBuilderFlavor.DISK,
+		}
+	} else {
+		flavor := replaceLocalVar(localsMap, flavorStr.(string))
+		openstackFlavor := parseOpenStackFlavor(flavor)
+		flavorResource = &openstackFlavor
+	}
+
+	if resource, ok := (*cloudResourceMap)[modelNameVal]; ok {
+		resource.CPU += flavorResource.CPU
+		resource.MEM += flavorResource.MEM
+		resource.DISK += flavorResource.DISK
+	} else {
+		(*cloudResourceMap)[modelNameVal] = flavorResource
+	}
 }
 
-// either local.variable_name or the username itself.
-func getCloudsYamlUsername(cloudsYamlContents string) string {
-	contentsMap := map[string]any{}
-	if err := yaml.Unmarshal([]byte(cloudsYamlContents), &contentsMap); err != nil {
-		panic("INVALID YAML FOUND")
-	}
-	clouds := contentsMap["clouds"].(map[string]any)
-	for _, authContents := range clouds {
-		authContentsMap := authContents.(map[string]any)["auth"].(map[string]any)
-		return strings.ReplaceAll(authContentsMap["username"].(string), "local.", "")
-	}
-	fmt.Println("Username in clouds yaml not detected")
-	return ""
-}
+const JujuConstraintCores string = "cores"
+const JujuConstraintMem string = "mem"
+const JujuConstraintDisk string = "root-disk"
 
-func getLocalUserNameVarToCloudNameMap(config *hcl.Config, clouds *map[CloudName]*Resource) map[string]CloudName {
-	localUserNameVarToCloudNameMap := map[string]CloudName{}
-	for _, variable := range config.Locals {
-		for key, val := range variable.Attributes {
-			if !strings.Contains(key, "user_name") {
-				continue
-			}
-			username_contents := val.(string)
-			for cloud_name := range *clouds {
-				if strings.Contains(username_contents, string(cloud_name)) {
-					localUserNameVarToCloudNameMap[key] = CloudName(cloud_name)
-				}
-			}
+func parseConstraints(constraintStr string) Resource {
+	cpu := 0
+	mem := 0
+	disk := 0
+	for _, constraint := range strings.Split(constraintStr, " ") {
+		resourceDef := strings.Split(constraint, "=")
+		resourceType := strings.TrimSpace((resourceDef[0]))
+		multiplier := 1
+		resourceVal := strings.TrimSpace(resourceDef[1])
+		if strings.Contains(resourceVal, "M") {
+			resourceVal = strings.ReplaceAll(resourceVal, "M", "")
+			multiplier = 1
+		} else if strings.Contains(resourceVal, "G") {
+			resourceVal = strings.ReplaceAll(resourceVal, "G", "")
+			multiplier = 1000
+		}
+		val, err := strconv.Atoi(resourceVal)
+		if err != nil && resourceType != "arch" {
+			fmt.Printf("[Warning] Invalid constraint resource value %s\n", constraintStr)
+			val = 0
+		}
+
+		if resourceType == JujuConstraintCores {
+			cpu = val
+		} else if resourceType == JujuConstraintMem {
+			mem = val * multiplier
+		} else if resourceType == JujuConstraintDisk {
+			disk = val * multiplier
 		}
 	}
-	return localUserNameVarToCloudNameMap
+	return Resource{
+		CPU:  cpu,
+		MEM:  mem,
+		DISK: disk,
+	}
 }
 
-// Return resource for charm deployment and VM deployment
-func parseRunner(resource *hcl.Resource, varNameToCloudName *map[LocalCloudVarName]CloudName) (CloudName, Resource, CloudName, Resource) {
-	if resource.Type != "juju_application" {
-		return "", Resource{}, "", Resource{}
-	}
-	if strings.Contains(resource.Name, "image") {
-		return "", Resource{}, "", Resource{}
-	}
-	if !strings.Contains(resource.Name, "github-runner") {
-		fmt.Println("Invalid resource name detected, assuming runner.")
-	}
-	fmt.Println("PARSING RUNNER")
-	constraints := resource.Attributes["constraints"].(string)
-	deploy_resource := parseConstraints(constraints)
-	config := resource.Attributes["config"].(map[string]any)
-	if _, ok := config["openstack-clouds-yaml"]; !ok {
-		fmt.Println("Runner application openstack-clouds-yaml not defined.")
-		return "", Resource{}, "", Resource{}
-	}
-	clouds_yaml_var := strings.ReplaceAll(config["openstack-clouds-yaml"].(string), "local.", "")
-	cloud_name := (*varNameToCloudName)[LocalCloudVarName(clouds_yaml_var)]
-	if cloud_name == "" {
-		fmt.Println("No cloud name detected for resource name: ", resource.Name)
-	}
-	vmResource := parseFlavor(config["openstack-flavor"].(string))
-	numVms, err := strconv.Atoi(config["virtual-machines"].(string))
-	if err != nil {
-		numVms = 0
-		fmt.Println("Invalid virtual-machines config detected")
-	}
-	vmResource.CPU *= numVms
-	vmResource.MEM *= numVms
-	vmResource.DISK *= numVms
-	return CloudName("DEFAULT"), deploy_resource, cloud_name, vmResource
-}
+const OpenstackFlavorCores string = "cpu"
+const OpenstackFlavorMem string = "ram"
+const OpenstackFlavorDisk string = "disk"
 
-// Return resource for charm deployment and VM deployment
-func parseImageBuilder(resource *hcl.Resource, varNameToCloudName *map[LocalCloudVarName]CloudName) (CloudName, Resource, CloudName, Resource) {
-	if resource.Type != "juju_application" {
-		return "", Resource{}, "", Resource{}
-	}
-	if !strings.Contains(resource.Name, "image") {
-		return "", Resource{}, "", Resource{}
-	}
-	fmt.Println("PARSING IMAGE BUILDER")
-	constraints := resource.Attributes["constraints"].(string)
-	deploy_resource := parseConstraints(constraints)
-	config := resource.Attributes["config"].(map[string]any)
-	if _, ok := config["experimental-external-build-flavor"]; !ok {
-		fmt.Println("experimental-external-build-flavor not defined.")
-		return "", Resource{}, "", Resource{}
-	}
-	if _, ok := config["openstack-user-name"]; !ok {
-		fmt.Println("openstack-user-name not defined.")
-		return "", Resource{}, "", Resource{}
-	}
-	varname := strings.ReplaceAll(config["openstack-user-name"].(string), "local.", "")
-	cloud_name := (*varNameToCloudName)[LocalCloudVarName(varname)]
-	vmResource := parseFlavor(config["experimental-external-build-flavor"].(string))
-	return CloudName("DEFAULT"), deploy_resource, cloud_name, vmResource
-}
-
-func parseConstraints(constraint_str string) Resource {
-	resource := Resource{}
-	constraints := strings.Split(constraint_str, " ")
-	for _, constraint := range constraints {
-		keyval := strings.Split(constraint, "=")
-		if keyval[0] == "cores" {
-			if v, err := strconv.Atoi(keyval[1]); err != nil {
-				fmt.Println("Invalid CPU value")
-				continue
-			} else {
-				resource.CPU += v
-			}
-		} else if keyval[0] == "mem" {
-			if v, err := strconv.Atoi(strings.Split(keyval[1], "M")[0]); err != nil {
-				fmt.Println("Invalid MEM value")
-				continue
-			} else {
-				resource.MEM += v
-			}
-		} else if keyval[0] == "root-disk" {
-			if v, err := strconv.Atoi(strings.Split(keyval[1], "M")[0]); err != nil {
-				fmt.Println("Invalid DISK value")
-				continue
-			} else {
-				resource.DISK += v
-			}
-		}
-	}
-	return resource
-}
-
-func parseFlavor(flavor_str string) Resource {
-	resource := Resource{}
-	defs := strings.Split(flavor_str, "-")
-	for _, def := range defs {
-		if strings.Contains(def, "cpu") {
-			coresStr := strings.ReplaceAll(def, "cpu", "")
-			cores, err := strconv.Atoi(coresStr)
+func parseOpenStackFlavor(flavorStr string) Resource {
+	cpu := 0
+	mem := 0
+	disk := 0
+	multiplier := 1000
+	for _, constraint := range strings.Split(flavorStr, "-") {
+		if strings.Contains(constraint, OpenstackFlavorCores) {
+			cpuStr := strings.TrimLeft(constraint, OpenstackFlavorCores)
+			val, err := strconv.Atoi(cpuStr)
 			if err != nil {
-				fmt.Println("Invalid flavor detected, setting cores to 0.")
-				cores = 0
+				fmt.Printf("[Warning] Invalid constraint CPU resource value %s\n", cpuStr)
 			}
-			resource.CPU = cores
-		}
-		if strings.Contains(def, "ram") {
-			ramStr := strings.ReplaceAll(def, "ram", "")
-			ram, err := strconv.Atoi(ramStr)
+			cpu = val
+		} else if strings.Contains(constraint, OpenstackFlavorMem) {
+			memStr := strings.TrimLeft(constraint, OpenstackFlavorMem)
+			val, err := strconv.Atoi(memStr)
 			if err != nil {
-				fmt.Println("Invalid flavor detected, setting ram to 0.")
-				ram = 0
+				fmt.Printf("[Warning] Invalid constraint MEM resource value %s\n", memStr)
 			}
-			resource.MEM = ram
-		}
-		if strings.Contains(def, "disk") {
-			diskStr := strings.ReplaceAll(def, "disk", "")
-			disk, err := strconv.Atoi(diskStr)
+			mem = val * multiplier
+		} else if strings.Contains(constraint, OpenstackFlavorDisk) {
+			diskStr := strings.TrimLeft(constraint, OpenstackFlavorDisk)
+			val, err := strconv.Atoi(diskStr)
 			if err != nil {
-				fmt.Println("Invalid flavor detected, setting disk to 0.")
-				disk = 0
+				fmt.Printf("[Warning] Invalid constraint DISK resource value %s\n", diskStr)
 			}
-			resource.DISK = disk
+			disk = val * multiplier
 		}
 	}
-	return resource
+	return Resource{
+		CPU:  cpu,
+		MEM:  mem,
+		DISK: disk,
+	}
 }
 
-func addResourceToClouds(cloudToResource *map[CloudName]*Resource, cloudName CloudName, resource *Resource) {
-	if _, ok := (*cloudToResource)[cloudName]; !ok {
-		(*cloudToResource)[cloudName] = &Resource{}
+// Get Cloud name
+func parseOpenStackCloudsYaml(yamlStr string) string {
+	yamlMap := map[string]any{}
+	if err := yaml.Unmarshal([]byte(yamlStr), yamlMap); err != nil {
+		fmt.Printf("[WARNING] Invalid Openstack clouds YAML %s \n", yamlStr)
+		return UndefinedModelName
 	}
-	targetResource := (*cloudToResource)[cloudName]
-	targetResource.CPU += resource.CPU
-	targetResource.MEM += resource.MEM
-	targetResource.DISK += resource.DISK
+	clouds := yamlMap["clouds"].(map[string]any)
+	for _, cloudMapAny := range clouds {
+		cloudMap := cloudMapAny.(map[string]any)
+		authMap := cloudMap["auth"].(map[string]any)
+		return authMap["username"].(string)
+	}
+	fmt.Printf("Cloud name not found in %s\n", yamlStr)
+	return UndefinedModelName
 }
