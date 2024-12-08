@@ -185,6 +185,7 @@ func parseImageBuilderCharm(resource *hcl.Resource, localsMap *map[string]string
 			resource.MEM += localModelResource.MEM
 			resource.DISK += localModelResource.DISK
 		} else {
+			modelName = replaceLocalVar(localsMap, modelName)
 			(*cloudResourceMap)[modelName] = localModelResource
 		}
 	} else {
@@ -204,7 +205,7 @@ func parseImageBuilderCharm(resource *hcl.Resource, localsMap *map[string]string
 	modelNameVal = replaceLocalVar(localsMap, modelNameVal)
 	flavorStr, ok := configs["experimental-external-build-flavor"]
 	var flavorResource *Resource
-	if !ok {
+	if !ok || flavorStr == "" {
 		fmt.Printf("[Warning] Image builder flavor not defined for %s, using default.\n", resource.Name)
 		flavorResource = &Resource{
 			CPU:  DefaultImageBuilderFlavor.CPU,
@@ -216,6 +217,10 @@ func parseImageBuilderCharm(resource *hcl.Resource, localsMap *map[string]string
 		openstackFlavor := parseOpenStackFlavor(flavor)
 		flavorResource = &openstackFlavor
 	}
+	multiplier := getImageBuilderMultiplier(resource)
+	flavorResource.CPU *= multiplier
+	flavorResource.MEM *= multiplier
+	flavorResource.DISK *= multiplier
 
 	if resource, ok := (*cloudResourceMap)[modelNameVal]; ok {
 		resource.CPU += flavorResource.CPU
@@ -332,4 +337,27 @@ func parseOpenStackCloudsYaml(yamlStr string) string {
 	}
 	fmt.Printf("Cloud name not found in %s\n", yamlStr)
 	return UndefinedModelName
+}
+
+func getImageBuilderMultiplier(resource *hcl.Resource) int {
+	jujuMultiplier := 0
+	microk8sMultiplier := 0
+	config := resource.Attributes["config"].(map[string]any)
+	var jujuChannelsStr = ""
+	var microk8sChannelsStr = ""
+	if _, ok := config["juju-channels"]; !ok {
+		jujuChannelsStr = ""
+	}
+	if _, ok := config["microk8s-channels"]; !ok {
+		microk8sChannelsStr = ""
+	}
+	jujuChannelsStr = strings.TrimSpace(jujuChannelsStr)
+	microk8sChannelsStr = strings.TrimSpace(microk8sChannelsStr)
+	if jujuChannelsStr != "" {
+		jujuMultiplier = len(strings.Split(jujuChannelsStr, ","))
+	}
+	if microk8sChannelsStr != "" {
+		microk8sMultiplier = len(strings.Split(microk8sChannelsStr, ","))
+	}
+	return 1 + jujuMultiplier*microk8sMultiplier
 }
