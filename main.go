@@ -43,7 +43,7 @@ var DefaultImageBuilderFlavor Resource = Resource{
 const DefaultNumVirtualMachines int = 1
 
 func main() {
-	files := []string{"main.tf"}
+	files := []string{"stg-main.tf"}
 	directories := []string{}
 
 	// Parse Terraform configurations
@@ -134,6 +134,7 @@ func parseGitHubRunnerCharm(resource *hcl.Resource, localsMap *map[string]string
 	cloudsYaml := configs["openstack-clouds-yaml"].(string)
 	cloudsYaml = replaceLocalVar(localsMap, cloudsYaml)
 	cloudName := parseOpenStackCloudsYaml(cloudsYaml)
+	cloudName = replaceLocalVar(localsMap, cloudName)
 	flavor := configs["openstack-flavor"].(string)
 	flavor = replaceLocalVar(localsMap, flavor)
 	cloudResource := parseOpenStackFlavor(flavor)
