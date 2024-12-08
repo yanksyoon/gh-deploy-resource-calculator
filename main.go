@@ -43,7 +43,7 @@ var DefaultImageBuilderFlavor Resource = Resource{
 const DefaultNumVirtualMachines int = 1
 
 func main() {
-	files := []string{"stg-main.tf"}
+	files := []string{"prod-main.tf"}
 	directories := []string{}
 
 	// Parse Terraform configurations
@@ -131,6 +131,20 @@ func parseGitHubRunnerCharm(resource *hcl.Resource, localsMap *map[string]string
 
 	// VM model deployment resource calculation
 	configs := resource.Attributes["config"].(map[string]any)
+	var numVirtualMachines = 1
+	vms, ok := configs["virtual-machines"]
+	if !ok {
+		fmt.Printf("[WARNING] Virtual machines not set for %s, using 1 (default).\n", resource.Name)
+	} else {
+		vmsStr := vms.(string)
+		numVms, err := strconv.Atoi(vmsStr)
+		if err != nil {
+			fmt.Printf("[WARNING] Invalid config virtual-machines for %s, using 1 (default).\n", resource.Name)
+			numVms = 1
+		}
+		numVirtualMachines = numVms
+	}
+
 	cloudsYaml := configs["openstack-clouds-yaml"].(string)
 	cloudsYaml = replaceLocalVar(localsMap, cloudsYaml)
 	cloudName := parseOpenStackCloudsYaml(cloudsYaml)
@@ -138,6 +152,9 @@ func parseGitHubRunnerCharm(resource *hcl.Resource, localsMap *map[string]string
 	flavor := configs["openstack-flavor"].(string)
 	flavor = replaceLocalVar(localsMap, flavor)
 	cloudResource := parseOpenStackFlavor(flavor)
+	cloudResource.CPU *= numVirtualMachines
+	cloudResource.MEM *= numVirtualMachines
+	cloudResource.DISK *= numVirtualMachines
 	if resource, ok := (*cloudResourceMap)[cloudName]; ok {
 		resource.CPU += cloudResource.CPU
 		resource.MEM += cloudResource.MEM
@@ -283,6 +300,16 @@ func parseOpenStackFlavor(flavorStr string) Resource {
 			disk = val * multiplier
 		}
 	}
+	if cpu == 0 {
+		fmt.Printf("[Warning] CPU 0 detectd in %s\n", flavorStr)
+	}
+	if mem == 0 {
+		fmt.Printf("[Warning] mem 0 detectd in %s\n", flavorStr)
+	}
+	if disk == 0 {
+		fmt.Printf("[Warning] disk 0 detectd in %s\n", flavorStr)
+	}
+
 	return Resource{
 		CPU:  cpu,
 		MEM:  mem,
