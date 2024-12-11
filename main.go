@@ -137,6 +137,7 @@ func parseGitHubRunnerCharm(resource *hcl.Resource, localsMap *map[string]string
 		fmt.Printf("[WARNING] Virtual machines not set for %s, using 1 (default).\n", resource.Name)
 	} else {
 		vmsStr := vms.(string)
+		vmsStr = replaceLocalVar(localsMap, vmsStr)
 		numVms, err := strconv.Atoi(vmsStr)
 		if err != nil {
 			fmt.Printf("[WARNING] Invalid config virtual-machines for %s, using 1 (default).\n", resource.Name)
