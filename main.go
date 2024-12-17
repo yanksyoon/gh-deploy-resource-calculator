@@ -204,6 +204,12 @@ func parseImageBuilderCharm(resource *hcl.Resource, localsMap *map[string]string
 	}
 	modelNameVal := modelName.(string)
 	modelNameVal = replaceLocalVar(localsMap, modelNameVal)
+
+	if strings.Contains(configs["openstack-auth-url"].(string), "ps6") {
+           modelNameVal += "-prodstack6"
+        } else {
+          modelNameVal += "-prodstack5"
+        }
 	flavorStr, ok := configs["experimental-external-build-flavor"]
 	var flavorResource *Resource
 	if !ok || flavorStr == "" {
@@ -334,7 +340,7 @@ func parseOpenStackCloudsYaml(yamlStr string) string {
 	for _, cloudMapAny := range clouds {
 		cloudMap := cloudMapAny.(map[string]any)
 		authMap := cloudMap["auth"].(map[string]any)
-		return authMap["username"].(string)
+		return authMap["username"].(string) + "-" + cloudMap["region_name"].(string)
 	}
 	fmt.Printf("Cloud name not found in %s\n", yamlStr)
 	return UndefinedModelName
